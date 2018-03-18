@@ -1,4 +1,5 @@
 #BIDAF Implementation
+from __future__ import division
 import numpy as np
 import dynet as dy
 from time import time
@@ -131,15 +132,19 @@ def loss_fn(p1, p2, gold_answer):
     loss = dy.pickneglogsoftmax(dy.inputTensor(p1), gold_answer[0]) + dy.pickneglogsoftmax(dy.inputTensor(p2), gold_answer[1])
     return loss
 
-def predict_fn(model, shared_file, data_file):
+def predict_fn(model, shared_file, data_file, train=True):
     word2vec = shared_file['lower_word2vec']
     Questions = data_file['q']
     passage_id = data_file['*x']
     Passages = shared_file['x']
-    Answers = np.array(data_file['y'])[:,0,:,0]
+    if train:
+        Answers = np.array(data_file['y'])[:,0,:,0]
+    else:
+        Answers = [np.array(a[0])[:,0] for a in data_file['y']]
+    
     num_correct = 0
 
-    for k in range(10):
+    for k in range(len(Answers)):
         answer = Answers[k]
         doc = Passages[passage_id[k][0]][passage_id[k][1]]      
         p1, p2 = model.complete_forward_pass((doc, Questions[k]))
@@ -150,7 +155,7 @@ def predict_fn(model, shared_file, data_file):
         if predict_start == answer[0] and predict_end == answer[1]:
             num_correct += 1
 
-    accuracy = num_correct/10 * 100
+    accuracy = num_correct/len(Answers) * 100
     return accuracy
 
 def main():
@@ -158,8 +163,8 @@ def main():
     shared_train = json.load(open('shared_train.json'))
     data_train = json.load(open('data_train.json')) 
 
-    shared_val = json.load(open('shared_val.json'))
-    data_val = json.load(open('data_val.json')) 
+    shared_dev = json.load(open('shared_dev.json'))
+    data_dev = json.load(open('data_dev.json')) 
 
     word2vec = shared_train['lower_word2vec']
     Questions = data_train['q']
@@ -169,11 +174,11 @@ def main():
     pc = dy.Model()
     trainer = dy.AdamTrainer(pc)
 
-    model = BiDAF(pc,100,50, load_model = True)
+    model = BiDAF(pc,100,50, load_model = False)
 
     for epoch in range(10):
         train_loss = 0
-        for k in range(10): #len(Answers)
+        for k in range(len(Answers)): #len(Answers)
             
             answer = Answers[k]
             doc = Passages[passage_id[k][0]][passage_id[k][1]]
@@ -183,19 +188,17 @@ def main():
             train_loss += loss.scalar_value()
             loss.backward()
             trainer.update()
-        print("Epoch: {} || Training Loss: {}".format(epoch+1,train_loss/10)) #len(Answers)
+        print("Epoch: {} || Training Loss: {}".format(epoch+1,train_loss/len(Answers))) #len(Answers)
         
         train_accuracy = predict_fn(model, shared_train, data_train)
         print("Epoch: {} || Training accuracy: {}".format(epoch+1, train_accuracy))
 
-        #val_accuracy = predict_fn(model, shared_val, data_val)
-        #print("Epoch: {} || Validation accuracy: {}".format(epoch+1, val_accuracy))
+        val_accuracy = predict_fn(model, shared_dev, data_dev, train=False)
+        print("Epoch: {} || Validation accuracy: {}".format(epoch+1, val_accuracy))
 
         #saving the model at every epoch
         dy.save('model' + str(epoch), [model.W_ss_, model.b_ss_, model.W_p1_, model.b_p1_, model.W_p2_, model.b_p2_,
                                        model.contextLSTM, model.queryLSTM, model.modellingLSTM, model.outputLSTM])
-
-
 
 if __name__ == '__main__':
     main()
