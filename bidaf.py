@@ -3,25 +3,29 @@ import numpy as np
 import dynet as dy
 from time import time
 import json
-	
+    
 class BiDAF():
-    def __init__(self, pc, word_emb_dim, hidden_dim):
-        self.pc = pc
+    def __init__(self, pc, word_emb_dim, hidden_dim, load_model=False):
         self.word_emb_dim = word_emb_dim
         self.hidden_dim = hidden_dim
 
         #self.lookup_table = pc.add_lookup_parameters((100000, word_emb_dim)) # or use pretrained glove embeddings
-        self.W_ss_ = pc.add_parameters((1, 3*hidden_dim))
-        self.b_ss_ = pc.add_parameters((1))
-        self.W_p1_ = pc.add_parameters((1, 5*hidden_dim))
-        self.b_p1_ = pc.add_parameters((1))
-        self.W_p2_ = pc.add_parameters((1, 5*hidden_dim))
-        self.b_p2_ = pc.add_parameters((1))
+        if not load_model:
+            self.W_ss_ = pc.add_parameters((1, 3*hidden_dim))
+            self.b_ss_ = pc.add_parameters((1))
+            self.W_p1_ = pc.add_parameters((1, 5*hidden_dim))
+            self.b_p1_ = pc.add_parameters((1))
+            self.W_p2_ = pc.add_parameters((1, 5*hidden_dim))
+            self.b_p2_ = pc.add_parameters((1))
 
-        self.contextLSTM = dy.VanillaLSTMBuilder(1, word_emb_dim, hidden_dim, pc)
-        self.queryLSTM = dy.VanillaLSTMBuilder(1, word_emb_dim, hidden_dim, pc)
-        self.modellingLSTM = dy.VanillaLSTMBuilder(1, 4 * hidden_dim, hidden_dim, pc) #TODO
-        self.outputLSTM = dy.VanillaLSTMBuilder(1,hidden_dim,hidden_dim, pc)
+            self.contextLSTM = dy.VanillaLSTMBuilder(1, word_emb_dim, hidden_dim, pc)
+            self.queryLSTM = dy.VanillaLSTMBuilder(1, word_emb_dim, hidden_dim, pc)
+            self.modellingLSTM = dy.VanillaLSTMBuilder(1, 4 * hidden_dim, hidden_dim, pc) #TODO
+            self.outputLSTM = dy.VanillaLSTMBuilder(1,hidden_dim,hidden_dim, pc)
+
+        else:
+            self.W_ss_, self.b_ss_, self.W_p1_, self.b_p1_, self.W_p2_, self.b_p2_, self.contextLSTM, self.queryLSTM, self.modellingLSTM, self.outputLSTM = dy.load('model9',pc)
+
 
     def similarity_score(self,h,u):
         concat = dy.concatenate([h,u,dy.cmult(h,u)],d=0)
@@ -50,9 +54,16 @@ class BiDAF():
         return dy.inputTensor(sim_matrix)
 
     def span_scores(self,combined_input1, combined_input2):
-        p1 = [self.W_p1*combined_input1[i] + self.b_p1 for i in range(self.T)]
-        p2 = [self.W_p2*combined_input2[i] + self.b_p2 for i in range(self.T)]
+        s1 = [self.W_p1*combined_input1[i] + self.b_p1 for i in range(self.T)]
+        s2 = [self.W_p2*combined_input2[i] + self.b_p2 for i in range(self.T)]
 #         p2 = self.W_p2*dy.inputTensor(combined_input2) + self.b_p2
+
+        p1 = np.zeros(self.T)
+        p2 = np.zeros(self.T)
+        
+        for i in range(self.T):
+            p1[i] = s1[i].scalar_value()
+            p2[i] = s2[i].scalar_value()
         return p1, p2
 
 
@@ -115,54 +126,79 @@ class BiDAF():
 
         return p1, p2
 
-def loss_fn(s1, s2, gold_answer):
-    T = len(s1)
-    p1 = np.zeros(T)
-    p2 = np.zeros(T)
-    
-    for i in range(T):
-        p1[i] = s1[i].scalar_value()
-        p2[i] = s2[i].scalar_value()
+def loss_fn(p1, p2, gold_answer):
         
     loss = dy.pickneglogsoftmax(dy.inputTensor(p1), gold_answer[0]) + dy.pickneglogsoftmax(dy.inputTensor(p2), gold_answer[1])
     return loss
 
+def predict_fn(model, shared_file, data_file):
+    word2vec = shared_file['lower_word2vec']
+    Questions = data_file['q']
+    passage_id = data_file['*x']
+    Passages = shared_file['x']
+    Answers = np.array(data_file['y'])[:,0,:,0]
+    num_correct = 0
+
+    for k in range(10):
+        answer = Answers[k]
+        doc = Passages[passage_id[k][0]][passage_id[k][1]]      
+        p1, p2 = model.complete_forward_pass((doc, Questions[k]))
+
+        predict_start = np.argmax(p1)
+        predict_end = np.argmax(p2)
+
+        if predict_start == answer[0] and predict_end == answer[1]:
+            num_correct += 1
+
+    accuracy = num_correct/10 * 100
+    return accuracy
 
 def main():
 
-	shared_train = json.load(open('shared_train.json'))
-	data_train = json.load(open('data_train.json'))	
+    shared_train = json.load(open('shared_train.json'))
+    data_train = json.load(open('data_train.json')) 
 
-	word2vec = shared_train['lower_word2vec']
-	Questions = data_train['q']
-	passage_id = data_train['*x']
-	Passages = shared_train['x']
-	Answers = np.array(data_train['y'])[:,0,:,0]  #answer spans
-	pc = dy.Model()
-	trainer = dy.AdamTrainer(pc)
+    shared_val = json.load(open('shared_val.json'))
+    data_val = json.load(open('data_val.json')) 
 
-	model = BiDAF(pc,100,50)
+    word2vec = shared_train['lower_word2vec']
+    Questions = data_train['q']
+    passage_id = data_train['*x']
+    Passages = shared_train['x']
+    Answers = np.array(data_train['y'])[:,0,:,0]  #answer spans
+    pc = dy.Model()
+    trainer = dy.AdamTrainer(pc)
 
-	for epoch in range(10):
-		train_loss = 0
-		for k in range(len(Answers)):
-			
-			answer = Answers[k]
-			doc = Passages[passage_id[k][0]][passage_id[k][1]]
-			
-			p1, p2 = model.complete_forward_pass((doc, Questions[k]))
-			loss = loss_fn(p1, p2, answer)
-			train_loss += loss.scalar_value()
-			loss.backward()
-			trainer.update()
-		print("Epoch: {} || Training Loss: {}".format(epoch+1,train_loss/len(Answers)))
+    model = BiDAF(pc,100,50, load_model = True)
+
+    for epoch in range(10):
+        train_loss = 0
+        for k in range(10): #len(Answers)
+            
+            answer = Answers[k]
+            doc = Passages[passage_id[k][0]][passage_id[k][1]]
+            
+            p1, p2 = model.complete_forward_pass((doc, Questions[k]))
+            loss = loss_fn(p1, p2, answer)
+            train_loss += loss.scalar_value()
+            loss.backward()
+            trainer.update()
+        print("Epoch: {} || Training Loss: {}".format(epoch+1,train_loss/10)) #len(Answers)
+        
+        train_accuracy = predict_fn(model, shared_train, data_train)
+        print("Epoch: {} || Training accuracy: {}".format(epoch+1, train_accuracy))
+
+        #val_accuracy = predict_fn(model, shared_val, data_val)
+        #print("Epoch: {} || Validation accuracy: {}".format(epoch+1, val_accuracy))
+
+        #saving the model at every epoch
+        dy.save('model' + str(epoch), [model.W_ss_, model.b_ss_, model.W_p1_, model.b_p1_, model.W_p2_, model.b_p2_,
+                                       model.contextLSTM, model.queryLSTM, model.modellingLSTM, model.outputLSTM])
 
 
-
-	#accuracy = predict('train')
 
 if __name__ == '__main__':
-	main()
+    main()
 
 
 
