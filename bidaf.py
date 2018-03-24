@@ -44,8 +44,8 @@ class BiDAF():
     def q2c_attention(self, sim_matrix, context_states):
         attention_vector = dy.softmax(dy.max_dim(sim_matrix))
         weighted_vectors = [b * a for a,b in zip(attention_vector, context_states)]
-
-        return [dy.esum(weighted_vectors) for _ in range(self.T)]
+        q2c = dy.esum(weighted_vectors)
+        return [q2c for _ in range(self.T)]
 
     def similarity_matrix(self, context_states, query_states):
         rows = [None] * self.J
@@ -176,7 +176,7 @@ def main():
     pc = dy.Model()
     trainer = dy.AdamTrainer(pc)
 
-    model = BiDAF(pc,100,50, load_model = False)
+    model = BiDAF(pc,100,100, load_model = False)
 
     for epoch in range(10):
         train_loss = 0
