@@ -1,4 +1,5 @@
 #BIDAF Implementation
+#BIDAF Implementation
 from __future__ import division
 import numpy as np
 import dynet as dy
@@ -21,7 +22,7 @@ class BiDAF():
 
             self.contextLSTM = dy.VanillaLSTMBuilder(1, word_emb_dim, hidden_dim, pc)
             self.queryLSTM = dy.VanillaLSTMBuilder(1, word_emb_dim, hidden_dim, pc)
-            self.modellingLSTM = dy.VanillaLSTMBuilder(1, 4 * hidden_dim, hidden_dim, pc) #TODO
+            self.modellingLSTM = dy.VanillaLSTMBuilder(2, 4 * hidden_dim, hidden_dim, pc) #TODO
             self.outputLSTM = dy.VanillaLSTMBuilder(1,hidden_dim,hidden_dim, pc)
 
         else:
@@ -32,7 +33,7 @@ class BiDAF():
         concat = dy.concatenate([h,u,dy.cmult(h,u)],d=0)
         score = self.W_ss * concat + self.b_ss
 
-        return score.scalar_value()
+        return score
 
     def c2q_attention(self, sim_matrix, query_states):
         attention_vector = dy.softmax(sim_matrix)
@@ -41,41 +42,43 @@ class BiDAF():
         return c2q
 
     def q2c_attention(self, sim_matrix, context_states):
-        attention_vector = dy.softmax(dy.max_dim(sim_matrix,d=1))
+        attention_vector = dy.softmax(dy.max_dim(sim_matrix))
         weighted_vectors = [b * a for a,b in zip(attention_vector, context_states)]
 
         return [dy.esum(weighted_vectors) for _ in range(self.T)]
 
     def similarity_matrix(self, context_states, query_states):
-        sim_matrix = np.zeros((self.J,self.T))
-        for i in range(len(query_states)):
-            for j in range(len(context_states)):
-                sim_matrix[i][j] = self.similarity_score(context_states[j],query_states[i])
-
-        return dy.inputTensor(sim_matrix)
+        rows = [None] * self.J
+        for i in range(self.J):
+            cols = [None] * self.T
+            for j in range(self.T):
+                cols[j] = self.similarity_score(context_states[j],query_states[i])
+            rows[i] = dy.concatenate_cols(cols)
+        sim_matrix = dy.concatenate(rows)
+        
+        return sim_matrix
 
     def span_scores(self,combined_input1, combined_input2):
         s1 = [self.W_p1*combined_input1[i] + self.b_p1 for i in range(self.T)]
         s2 = [self.W_p2*combined_input2[i] + self.b_p2 for i in range(self.T)]
 #         p2 = self.W_p2*dy.inputTensor(combined_input2) + self.b_p2
 
-        p1 = np.zeros(self.T)
-        p2 = np.zeros(self.T)
+        p1 = dy.concatenate(s1)
+        p2 = dy.concatenate(s2)
         
-        for i in range(self.T):
-            p1[i] = s1[i].scalar_value()
-            p2[i] = s2[i].scalar_value()
         return p1, p2
 
 
-    def complete_forward_pass(self, inputs):
+    def complete_forward_pass(self, inputs, word2vec):
         dy.renew_cg()
         context_embs = inputs[0]
         query_embs = inputs[1]
 
         query_embs = []
         context_embs = []
-
+        
+        kw = 0
+        uw = 0
         for word in inputs[1]:
             try:
                 query_embs.append(dy.inputTensor(word2vec[word.lower()]))
@@ -87,7 +90,7 @@ class BiDAF():
                 context_embs.append(dy.inputTensor(word2vec[word.lower()]))
             except:
                 context_embs.append(dy.random_normal(100))
-
+                
         self.T = len(context_embs)
         self.J = len(query_embs)
 
@@ -128,8 +131,7 @@ class BiDAF():
         return p1, p2
 
 def loss_fn(p1, p2, gold_answer):
-        
-    loss = dy.pickneglogsoftmax(dy.inputTensor(p1), gold_answer[0]) + dy.pickneglogsoftmax(dy.inputTensor(p2), gold_answer[1])
+    loss = dy.pickneglogsoftmax(p1, gold_answer[0]) + dy.pickneglogsoftmax(p2, gold_answer[1])
     return loss
 
 def predict_fn(model, shared_file, data_file, train=True):
@@ -147,10 +149,10 @@ def predict_fn(model, shared_file, data_file, train=True):
     for k in range(len(Answers)):
         answer = Answers[k]
         doc = Passages[passage_id[k][0]][passage_id[k][1]]      
-        p1, p2 = model.complete_forward_pass((doc, Questions[k]))
+        p1, p2 = model.complete_forward_pass((doc, Questions[k]), word2vec)
 
-        predict_start = np.argmax(p1)
-        predict_end = np.argmax(p2)
+        predict_start = np.argmax(p1.npvalue())
+        predict_end = np.argmax(p2.npvalue())
 
         if predict_start == answer[0] and predict_end == answer[1]:
             num_correct += 1
@@ -178,18 +180,20 @@ def main():
 
     for epoch in range(10):
         train_loss = 0
-        for k in range(len(Answers)): #len(Answers)
-            
+        for k in np.random.permutation(len(Answers)): #len(Answers)
+
             answer = Answers[k]
             doc = Passages[passage_id[k][0]][passage_id[k][1]]
-            
-            p1, p2 = model.complete_forward_pass((doc, Questions[k]))
+            p1, p2 = model.complete_forward_pass((doc, Questions[k]), word2vec)
+    #         print(answer)
+    #         print(np.argmax(p1),np.argmax(p2))
+    #         time.sleep(2)
             loss = loss_fn(p1, p2, answer)
             train_loss += loss.scalar_value()
             loss.backward()
             trainer.update()
         print("Epoch: {} || Training Loss: {}".format(epoch+1,train_loss/len(Answers))) #len(Answers)
-        
+
         train_accuracy = predict_fn(model, shared_train, data_train)
         print("Epoch: {} || Training accuracy: {}".format(epoch+1, train_accuracy))
 
